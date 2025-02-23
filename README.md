@@ -1,7 +1,11 @@
 # Gmail TUI
 
 A terminal-based user interface for Gmail built with Go and the Bubble Tea framework. This application allows you to read your Gmail inbox directly from the terminal with a clean, intuitive interface.
-Show Image
+
+## Images
+![image](https://github.com/user-attachments/assets/b5f4b6aa-f4c3-4599-9416-2a0bd860a073)
+![image](https://github.com/user-attachments/assets/e655fd02-938b-4c48-b253-fb42705ce673)
+
 
 ## Features
 
@@ -26,7 +30,7 @@ Show Image
 Clone the repository:
 
 ```bash
-git clone <your-repository-url>
+git clone https://github.com/adityanagar10/gmail-tui.git
 ```
 
 ```bash
