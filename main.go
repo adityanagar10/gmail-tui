@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/help"
@@ -34,11 +35,6 @@ var (
 	infoStyle = lipgloss.NewStyle().
 			MarginLeft(2).
 			Foreground(lipgloss.Color("#9B9B9B"))
-
-	selectedStyle = lipgloss.NewStyle().
-			Border(lipgloss.NormalBorder()).
-			BorderForeground(lipgloss.Color("#FF75B7")).
-			Padding(0, 0, 0, 1)
 
 	helpStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#626262")).
@@ -70,16 +66,20 @@ type Model struct {
 	selectedMail *Email
 	gmailSvc     *gmail.Service
 	err          error
+	width        int
+	height       int
 }
 
 type keyMap struct {
-	Up     key.Binding
-	Down   key.Binding
-	Select key.Binding
-	Back   key.Binding
-	Quit   key.Binding
-	Help   key.Binding
-	Fetch  key.Binding
+	Up       key.Binding
+	Down     key.Binding
+	Select   key.Binding
+	Back     key.Binding
+	Quit     key.Binding
+	Help     key.Binding
+	Fetch    key.Binding
+	PageUp   key.Binding
+	PageDown key.Binding
 }
 
 func (k keyMap) ShortHelp() []key.Binding {
@@ -88,48 +88,29 @@ func (k keyMap) ShortHelp() []key.Binding {
 
 func (k keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.Up, k.Down, k.Select},
-		{k.Back, k.Fetch},
+		{k.Up, k.Down, k.PageUp, k.PageDown},
+		{k.Select, k.Back, k.Fetch},
 		{k.Help, k.Quit},
 	}
 }
 
 func NewKeyMap() keyMap {
 	return keyMap{
-		Up: key.NewBinding(
-			key.WithKeys("up", "k"),
-			key.WithHelp("↑/k", "up"),
-		),
-		Down: key.NewBinding(
-			key.WithKeys("down", "j"),
-			key.WithHelp("↓/j", "down"),
-		),
-		Select: key.NewBinding(
-			key.WithKeys("enter"),
-			key.WithHelp("enter", "select"),
-		),
-		Back: key.NewBinding(
-			key.WithKeys("esc"),
-			key.WithHelp("esc", "back"),
-		),
-		Help: key.NewBinding(
-			key.WithKeys("?"),
-			key.WithHelp("?", "toggle help"),
-		),
-		Quit: key.NewBinding(
-			key.WithKeys("q", "ctrl+c"),
-			key.WithHelp("q", "quit"),
-		),
-		Fetch: key.NewBinding(
-			key.WithKeys("r"),
-			key.WithHelp("r", "refresh"),
-		),
+		Up:       key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up")),
+		Down:     key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
+		Select:   key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "select")),
+		Back:     key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+		Help:     key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "toggle help")),
+		Quit:     key.NewBinding(key.WithKeys("Q", "ctrl+c"), key.WithHelp("Q", "quit")),
+		Fetch:    key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
+		PageUp:   key.NewBinding(key.WithKeys("pgup"), key.WithHelp("pgup", "page up")),
+		PageDown: key.NewBinding(key.WithKeys("pgdown"), key.WithHelp("pgdown", "page down")),
 	}
 }
 
 func initialModel(svc *gmail.Service) Model {
 	keys := NewKeyMap()
-	help := help.New()
+
 	s := spinner.New()
 	s.Spinner = spinner.Dot
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
@@ -149,34 +130,54 @@ func initialModel(svc *gmail.Service) Model {
 	l.Title = "Gmail Inbox"
 	l.Styles.Title = titleStyle
 
+	vp := viewport.New(80, 20)
+	vp.Style = lipgloss.NewStyle().Padding(1, 2)
+
 	return Model{
 		list:     l,
-		help:     help,
+		help:     help.New(),
 		keys:     keys,
 		spinner:  s,
+		viewport: vp,
 		gmailSvc: svc,
 		loading:  true,
 	}
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(
-		m.spinner.Tick,
-		m.fetchEmails,
-	)
+	return tea.Batch(m.spinner.Tick, m.fetchEmails)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		m.list.SetWidth(msg.Width)
+		m.list.SetHeight(msg.Height - 6)
+
+		if m.selectedMail != nil {
+			m.viewport.Width = msg.Width - 4
+			m.viewport.Height = msg.Height - 7
+		}
+
 	case tea.KeyMsg:
 		if m.selectedMail != nil {
 			switch {
 			case key.Matches(msg, m.keys.Back):
 				m.selectedMail = nil
-				return m, nil
+			case key.Matches(msg, m.keys.PageDown):
+				m.viewport.HalfViewDown()
+			case key.Matches(msg, m.keys.PageUp):
+				m.viewport.HalfViewUp()
+			case key.Matches(msg, m.keys.Down):
+				m.viewport.LineDown(1)
+			case key.Matches(msg, m.keys.Up):
+				m.viewport.LineUp(1)
 			}
+			return m, nil
 		}
 
 		switch {
@@ -190,7 +191,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.Select):
 			if i, ok := m.list.SelectedItem().(Email); ok {
 				m.selectedMail = &i
-				return m, nil
+				m.viewport.Width = m.width - 4
+				m.viewport.Height = m.height - 7
+				m.viewport.SetContent(i.Body)
 			}
 		}
 
@@ -216,6 +219,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		newList, cmd := m.list.Update(msg)
 		m.list = newList
 		cmds = append(cmds, cmd)
+	} else {
+		var cmd tea.Cmd
+		m.viewport, cmd = m.viewport.Update(msg)
+		cmds = append(cmds, cmd)
 	}
 
 	return m, tea.Batch(cmds...)
@@ -231,12 +238,19 @@ func (m Model) View() string {
 	}
 
 	if m.selectedMail != nil {
-		return fmt.Sprintf(
-			"\n%s\n\n%s\n\n%s\n\n%s\n\nPress ESC to go back\n",
+		header := fmt.Sprintf(
+			"%s\n%s\n%s\n%s\n",
 			titleStyle.Render(m.selectedMail.Subject),
 			infoStyle.Render(fmt.Sprintf("From: %s", m.selectedMail.From)),
 			infoStyle.Render(fmt.Sprintf("Date: %s", m.selectedMail.Date.Format("2006-01-02 15:04"))),
-			m.selectedMail.Body,
+			strings.Repeat("─", m.viewport.Width),
+		)
+
+		return fmt.Sprintf(
+			"%s\n%s\n\n%s",
+			header,
+			m.viewport.View(),
+			helpStyle.Render("↑/↓: scroll • esc: back • ?: help"),
 		)
 	}
 
@@ -253,25 +267,20 @@ type errMsg error
 func getMessageBody(payload *gmail.MessagePart) string {
 	if payload.Body != nil && payload.Body.Data != "" {
 		data, err := base64.URLEncoding.DecodeString(payload.Body.Data)
-		if err != nil {
-			return ""
+		if err == nil {
+			return string(data)
 		}
-		return string(data)
 	}
 
 	if payload.Parts != nil {
 		for _, part := range payload.Parts {
-			if part.MimeType == "text/plain" {
-				if part.Body != nil && part.Body.Data != "" {
-					data, err := base64.URLEncoding.DecodeString(part.Body.Data)
-					if err != nil {
-						continue
-					}
+			if part.MimeType == "text/plain" && part.Body != nil && part.Body.Data != "" {
+				data, err := base64.URLEncoding.DecodeString(part.Body.Data)
+				if err == nil {
 					return string(data)
 				}
 			}
 		}
-		// If no text/plain, try first part
 		if len(payload.Parts) > 0 {
 			return getMessageBody(payload.Parts[0])
 		}
@@ -281,25 +290,21 @@ func getMessageBody(payload *gmail.MessagePart) string {
 }
 
 func (m Model) fetchEmails() tea.Msg {
-	user := "me"
-	r, err := m.gmailSvc.Users.Messages.List(user).Q("").MaxResults(20).Do()
+	r, err := m.gmailSvc.Users.Messages.List("me").Q("").MaxResults(20).Do()
 	if err != nil {
-		log.Printf("Error listing messages: %v", err)
 		return errMsg(err)
 	}
 
 	var emails []Email
 	for _, msg := range r.Messages {
-		email, err := m.gmailSvc.Users.Messages.Get(user, msg.Id).Format("full").Do()
+		email, err := m.gmailSvc.Users.Messages.Get("me", msg.Id).Format("full").Do()
 		if err != nil {
-			log.Printf("Error getting message %s: %v", msg.Id, err)
 			continue
 		}
 
 		var from, subject string
 		var date time.Time
 
-		// Extract headers
 		for _, header := range email.Payload.Headers {
 			switch header.Name {
 			case "From":
@@ -307,21 +312,13 @@ func (m Model) fetchEmails() tea.Msg {
 			case "Subject":
 				subject = header.Value
 			case "Date":
-				parsedDate, err := time.Parse("Mon, 2 Jan 2006 15:04:05 -0700", header.Value)
-				if err == nil {
-					date = parsedDate
-				} else {
-					// Try alternate date format
-					parsedDate, err = time.Parse("Mon, 02 Jan 2006 15:04:05 -0700", header.Value)
-					if err == nil {
-						date = parsedDate
-					}
+				if d, err := time.Parse("Mon, 2 Jan 2006 15:04:05 -0700", header.Value); err == nil {
+					date = d
+				} else if d, err := time.Parse("Mon, 02 Jan 2006 15:04:05 -0700", header.Value); err == nil {
+					date = d
 				}
 			}
 		}
-
-		// Extract body
-		body := getMessageBody(email.Payload)
 
 		if subject == "" {
 			subject = "(no subject)"
@@ -332,47 +329,45 @@ func (m Model) fetchEmails() tea.Msg {
 			From:    from,
 			Subject: subject,
 			Date:    date,
-			Body:    body,
+			Body:    getMessageBody(email.Payload),
 		})
 	}
 
-	log.Printf("Fetched %d emails", len(emails))
-	for i, email := range emails {
-		log.Printf("Email %d: Subject: %s, From: %s", i+1, email.Subject, email.From)
-	}
 	return EmailsMsg(emails)
 }
 
-func getTokenFromWeb(config *oauth2.Config) *oauth2.Token {
-	// Create channel to receive the auth code
-	codeChan := make(chan string)
+func getClient(config *oauth2.Config) *http.Client {
+	tokFile := "token.json"
+	tok, err := tokenFromFile(tokFile)
+	if err != nil {
+		tok = getTokenFromWeb(config)
+		saveToken(tokFile, tok)
+	}
+	return config.Client(context.Background(), tok)
+}
 
-	// Start local server to handle the redirect
+func getTokenFromWeb(config *oauth2.Config) *oauth2.Token {
+	codeChan := make(chan string)
 	server := &http.Server{Addr: ":8080"}
 
-	// Handle the OAuth2 callback
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		code := r.URL.Query().Get("code")
-		if code != "" {
+		if code := r.URL.Query().Get("code"); code != "" {
 			fmt.Fprintf(w, "Authorization successful! You can close this window.")
 			codeChan <- code
 		}
 	})
 
-	// Start server in a goroutine
 	go func() {
 		if err := server.ListenAndServe(); err != http.ErrServerClosed {
 			log.Printf("HTTP server error: %v", err)
 		}
 	}()
 
-	// Set the correct redirect URL
 	config.RedirectURL = "http://localhost:8080"
 	authURL := config.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
 
 	fmt.Printf("Opening this URL in your browser: \n%v\n", authURL)
 
-	// Try to open the URL in the default browser
 	var cmd string
 	switch runtime.GOOS {
 	case "linux":
@@ -384,10 +379,7 @@ func getTokenFromWeb(config *oauth2.Config) *oauth2.Token {
 	}
 	exec.Command(cmd, authURL).Start()
 
-	// Wait for the code
 	authCode := <-codeChan
-
-	// Shutdown the server
 	server.Shutdown(context.Background())
 
 	tok, err := config.Exchange(context.Background(), authCode)
@@ -404,8 +396,7 @@ func tokenFromFile(file string) (*oauth2.Token, error) {
 	}
 	defer f.Close()
 	tok := &oauth2.Token{}
-	err = json.NewDecoder(f).Decode(tok)
-	return tok, err
+	return tok, json.NewDecoder(f).Decode(tok)
 }
 
 func saveToken(path string, token *oauth2.Token) {
@@ -415,16 +406,6 @@ func saveToken(path string, token *oauth2.Token) {
 	}
 	defer f.Close()
 	json.NewEncoder(f).Encode(token)
-}
-
-func getClient(config *oauth2.Config) *http.Client {
-	tokFile := "token.json"
-	tok, err := tokenFromFile(tokFile)
-	if err != nil {
-		tok = getTokenFromWeb(config)
-		saveToken(tokFile, tok)
-	}
-	return config.Client(context.Background(), tok)
 }
 
 func getGmailService() (*gmail.Service, error) {
